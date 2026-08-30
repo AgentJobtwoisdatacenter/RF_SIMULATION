@@ -14,7 +14,7 @@ import dataclasses
 import numpy as np
 import pytest
 
-from rf_linksim import antenna, constants, environment, geometry, link, montecarlo, pathloss, sweep
+from rf_linksim import antenna, constants, environment, geometry, link, montecarlo, pathloss, requirements, sweep
 
 
 # --- constants.py ------------------------------------------------------------
@@ -744,3 +744,52 @@ def test_grid_sweep_shape_and_spot_check():
     scalar_tx = dataclasses.replace(tx, height_m=50.0)
     scalar_result = link.compute_link_budget(scalar_scenario, scalar_tx, rx)
     assert grid.p_rx_dbm[1, 0] == pytest.approx(scalar_result.p_rx_dbm)
+
+
+# --- requirements.py: die Bruecke zu Schritt 2 ------------------------------
+
+
+def test_snr_reproduces_document_intro_table():
+    """Die SNR-Tabelle aus der INSTRUCITONS.md-Einleitung, C/N0 = 83,7 dB-Hz."""
+    cn0 = 83.7
+    assert requirements.snr_db(cn0, 20e6, noise_figure_db=6.0) == pytest.approx(4.7, abs=0.05)
+    assert requirements.snr_db(cn0, 27e6, noise_figure_db=6.0) == pytest.approx(3.4, abs=0.05)
+    assert requirements.snr_db(cn0, 27e6, noise_figure_db=3.0) == pytest.approx(6.4, abs=0.05)
+    assert requirements.snr_db(cn0, 56e6, noise_figure_db=6.0) == pytest.approx(0.2, abs=0.05)
+
+
+def test_max_noise_figure_is_inverse_of_snr():
+    cn0, bw, nf = 83.7, 27e6, 4.5
+    snr = requirements.snr_db(cn0, bw, nf)
+    nf_back = requirements.max_noise_figure_db(cn0, bw, snr_target_db=snr)
+    assert nf_back == pytest.approx(nf, abs=1e-9)
+
+
+def test_max_noise_figure_table_shape_and_values():
+    table = requirements.max_noise_figure_table(83.7, bandwidths_hz=[20e6, 27e6], snr_targets_db=[3.0, 6.0])
+    assert table.shape == (2, 2)
+    assert table[0, 0] == pytest.approx(requirements.max_noise_figure_db(83.7, 20e6, 3.0))
+    assert table[1, 1] == pytest.approx(requirements.max_noise_figure_db(83.7, 27e6, 6.0))
+
+
+def test_required_dynamic_range_matches_span():
+    p_rx = np.array([-60.0, -75.0, -90.0, -110.5])
+    assert requirements.required_dynamic_range_db(p_rx) == pytest.approx(50.5)
+    assert requirements.required_dynamic_range_bits(p_rx) == pytest.approx(50.5 / 6.02)
+
+
+def test_spectral_power_density_matches_27mhz_pitfall_example():
+    """Fallstrick 2 aus INSTRUCITONS.md: Gesamtleistung vs. Dichte, 27 MHz
+    Signalbandbreite kostet 74,3 dB Unterschied."""
+    p_rx_dbm = -90.3
+    psd = requirements.spectral_power_density_dbm_per_hz(p_rx_dbm, signal_bandwidth_hz=27e6)
+    assert p_rx_dbm - psd == pytest.approx(74.3, abs=0.05)
+
+
+def test_spectral_power_density_recovers_bin_power():
+    p_rx_dbm = -85.0
+    b_signal = 27e6
+    psd = requirements.spectral_power_density_dbm_per_hz(p_rx_dbm, b_signal)
+    # Aufsummiert ueber die volle Signalbandbreite muss PSD wieder P_rx ergeben.
+    p_recovered = psd + 10.0 * np.log10(b_signal)
+    assert p_recovered == pytest.approx(p_rx_dbm)
