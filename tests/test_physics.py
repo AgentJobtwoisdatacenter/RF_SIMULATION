@@ -24,6 +24,7 @@ from rf_linksim import (
     montecarlo,
     pathloss,
     plotting,
+    receiver,
     requirements,
     sweep,
 )
@@ -902,3 +903,60 @@ def test_distance_sweep_dual_diversity_all_stages():
     for stage, r in results.items():
         assert r.cn0_combined_db_hz.shape == distances.shape
         assert np.all(r.cn0_combined_db_hz >= r.branch_a.cn0_db_hz - 1e-9)
+
+
+# --- receiver.py: Schritt 2 (Demodulation + Detektion) ----------------------
+
+
+def test_albersheim_matches_textbook_reference_point():
+    """Pd=0,9, Pfa=1e-6, n=1: ~13,1 dB, Standard-Lehrbuchbeispiel
+    (z. B. Richards, Fundamentals of Radar Signal Processing)."""
+    snr = receiver.albersheim_required_snr_db(pd=0.9, pfa=1e-6, n_pulses=1)
+    assert snr == pytest.approx(13.1, abs=0.1)
+
+
+def test_albersheim_required_snr_decreases_with_more_pulses():
+    values = [receiver.albersheim_required_snr_db(0.9, 1e-6, n) for n in (1, 10, 100, 1000)]
+    assert values == sorted(values, reverse=True)
+
+
+def test_effective_noise_figure_unchanged_below_agc_threshold():
+    nf = receiver.effective_noise_figure_db(p_rx_dbm=-40.0, agc_threshold_dbm=-20.0)
+    assert nf == pytest.approx(3.8)
+
+
+def test_effective_noise_figure_degrades_above_agc_threshold():
+    nf_low = receiver.effective_noise_figure_db(p_rx_dbm=-20.0, agc_threshold_dbm=-20.0)
+    nf_high = receiver.effective_noise_figure_db(p_rx_dbm=-10.0, agc_threshold_dbm=-20.0)
+    assert nf_high > nf_low
+    assert nf_high == pytest.approx(nf_low + 10.0, abs=1e-9)  # 1 dB NF pro dB Rueckregelung
+
+
+def test_effective_noise_figure_bounded_by_real_gain_range():
+    """Die Gain-Reduktion darf nie groesser sein als der tatsaechliche
+    Gain-Bereich aus dem Datenblatt (65,5 dB bei 5,5 GHz)."""
+    nf_extreme = receiver.effective_noise_figure_db(p_rx_dbm=100.0, agc_threshold_dbm=-20.0)
+    expected_max = 3.8 + (receiver.MAX_GAIN_DB_5500MHZ - receiver.MIN_GAIN_DB)
+    assert nf_extreme == pytest.approx(expected_max)
+
+
+def test_demodulation_snr_matches_requirements_formula_at_max_gain():
+    """Unterhalb der AGC-Schwelle muss receiver.demodulation_snr_db() exakt
+    requirements.snr_db() mit der Max-Gain-NF entsprechen."""
+    cn0, bw = 88.0, 27e6
+    snr_receiver = receiver.demodulation_snr_db(cn0, bw, p_rx_dbm=-90.0, agc_threshold_dbm=-20.0)
+    snr_requirements = requirements.snr_db(cn0, bw, noise_figure_db=3.8)
+    assert snr_receiver == pytest.approx(snr_requirements)
+
+
+def test_detection_margin_improves_with_more_looks():
+    cn0, bw = 70.0, 27e6
+    _, _, margin_1 = receiver.detection_margin_db(cn0, bw, p_rx_dbm=-100.0, n_looks=1)
+    _, _, margin_100 = receiver.detection_margin_db(cn0, bw, p_rx_dbm=-100.0, n_looks=100)
+    assert margin_100 > margin_1
+
+
+def test_detection_margin_consistent_with_components():
+    cn0, bw = 75.0, 27e6
+    single, required, margin = receiver.detection_margin_db(cn0, bw, p_rx_dbm=-95.0, n_looks=20)
+    assert margin == pytest.approx(single - required)
