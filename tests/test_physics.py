@@ -12,7 +12,7 @@ constants.py, geometry.py, antenna.py und pathloss.py.
 import numpy as np
 import pytest
 
-from rf_linksim import antenna, constants, geometry, pathloss
+from rf_linksim import antenna, constants, environment, geometry, pathloss
 
 
 # --- constants.py ------------------------------------------------------------
@@ -370,3 +370,87 @@ def test_rain_attenuation_power_law_in_rain_rate():
     l1 = pathloss.rain_attenuation_db(1000.0, rain_rate_mm_per_hr=10.0, k=0.01, alpha=1.3)
     l2 = pathloss.rain_attenuation_db(1000.0, rain_rate_mm_per_hr=20.0, k=0.01, alpha=1.3)
     assert l2 / l1 == pytest.approx(2.0**1.3)
+
+
+# --- environment.py: Al-Hourani-Clutter, Vegetation, Stufenparameter -------
+
+
+def test_weissberger_10m_5_8ghz():
+    loss = environment.vegetation_loss_weissberger_db(depth_m=10.0, frequency_hz=5.8e9)
+    assert loss == pytest.approx(7.4, abs=0.05)
+
+
+def test_weissberger_vectorizes_and_increases_with_depth():
+    depths = np.array([5.0, 10.0, 20.0, 100.0, 300.0])
+    losses = environment.vegetation_loss_weissberger_db(depths, frequency_hz=5.8e9)
+    assert losses.shape == depths.shape
+    assert np.all(np.diff(losses) > 0)
+
+
+def test_weissberger_branches_roughly_continuous_at_14m():
+    """Bekannte kleine Unstetigkeit des Weissberger-Modells am 14-m-Uebergang
+    (Modified Exponential Decay) -- muss klein bleiben (<10 %), nicht exakt 0."""
+    just_below = environment.vegetation_loss_weissberger_db(13.99, 5.8e9)
+    just_above = environment.vegetation_loss_weissberger_db(14.01, 5.8e9)
+    assert abs(just_above - just_below) / just_below < 0.10
+
+
+def test_los_probability_approaches_one_at_zenith():
+    """Sender senkrecht ueber dem Empfaenger (epsilon=90 Grad): P_LOS -> 1
+    fuer jede Stufe. Ein Sigmoid erreicht 1 nur asymptotisch, deshalb keine
+    zu enge Toleranz -- "nur eta_LOS bleibt uebrig" heisst "praktisch nur",
+    nicht "auf Maschinengenauigkeit exakt"."""
+    for stage in environment.STAGES.values():
+        p_los = environment.los_probability(90.0, stage)
+        assert p_los == pytest.approx(1.0, abs=5e-3)
+
+
+def test_clutter_loss_only_eta_los_remains_at_zenith():
+    """Direkt aus INSTRUCITONS.md: 'Senkrecht ueber dem Empfaenger bleibt nur
+    eta_LOS uebrig.' (asymptotisch, siehe test_los_probability_approaches_one_at_zenith)."""
+    for stage in environment.STAGES.values():
+        loss = environment.clutter_loss_al_hourani_db(90.0, stage)
+        assert loss == pytest.approx(stage.eta_los_db, abs=0.1)
+
+
+def test_clutter_loss_monotonic_across_stages_and_elevation():
+    """Strukturtest aus INSTRUCITONS.md: eine dichtere Umgebungsstufe darf das
+    Signal nie verbessern -- L_clutter(Stufe k) <= L_clutter(Stufe k+1) fuer
+    JEDEN Elevationswinkel, nicht nur im Basisszenario."""
+    elevations = np.linspace(0.1, 90.0, 900)
+    losses_by_stage = [
+        environment.clutter_loss_al_hourani_db(elevations, environment.STAGES[k])
+        for k in (1, 2, 3, 4)
+    ]
+    for lower, higher in zip(losses_by_stage, losses_by_stage[1:]):
+        assert np.all(higher >= lower - 1e-9)
+
+
+def test_clutter_loss_baseline_scenario_stage1():
+    """3 km/100 m/2 m, Stufe 1 -- Zwischenwert aus der eigenen Nachrechnung
+    (nicht direkt in INSTRUCITONS.md tabelliert, aber Teil der Kette, die auf
+    die Verifikationstabelle fuehrt)."""
+    eps_deg = geometry.elevation_angle_deg(d_ground=3000.0, h_tx=100.0, h_rx=2.0)
+    loss = environment.clutter_loss_al_hourani_db(eps_deg, environment.STAGES[1])
+    assert loss == pytest.approx(5.631, abs=0.01)
+
+
+def test_clutter_loss_fixed_is_passthrough():
+    assert environment.clutter_loss_fixed_db(12.3) == 12.3
+
+
+def test_frequency_correction_zero_at_reference():
+    assert environment.frequency_correction_db(2.0e9, reference_hz=2.0e9) == pytest.approx(0.0)
+
+
+def test_frequency_correction_positive_above_reference():
+    corr = environment.frequency_correction_db(5.8e9, reference_hz=2.0e9)
+    assert corr > 0.0
+    assert corr == pytest.approx(10.0 * np.log10(5.8e9 / 2.0e9))
+
+
+def test_stage_2_eta_nlos_corrected_for_monotonicity():
+    """Fallstrick 3: 18,0 dB statt der publizierten 21,0 dB, damit die Skala
+    monoton bleibt -- Regressionsschutz gegen versehentliches Zuruecksetzen
+    auf den publizierten Wert."""
+    assert environment.STAGES[2].eta_nlos_db == 18.0
