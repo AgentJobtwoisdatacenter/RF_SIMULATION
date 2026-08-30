@@ -1,0 +1,36 @@
+# Verifikations-Baseline -- reproduziert das Basisszenario aus INSTRUCITONS.md
+# 1:1. Gegen diese Konfiguration ist die Sollwerttabelle in
+# tests/test_physics.py geprueft. NICHT aendern, ohne die Tests mitzuziehen.
+#
+# Jeder Wert unten, der keine Messung ist, sondern eine Annahme, ist mit
+# "# ANNAHME" markiert (INSTRUCITONS.md, "Vorgehen").
+
+transmitter:
+  power_dbm: 33.0103        # 2 W HF-Ausgangsleistung, exakt (10*log10(2000))
+  power_is_eirp: false       # Basisszenario: Ausgangsleistung, nicht EIRP -- ANNAHME (Teil 0, Frage 1)
+  frequency_hz: 5.8e+9       # Vorsicht: "5.8e9" ohne Vorzeichen im Exponenten wird von PyYAML als String geparst, nicht als Zahl
+  height_m: 100.0
+  tilt_deg: 0.0               # senkrecht haengend -- Verifikations-Baseline, siehe operational.yaml fuer den echten Tilt
+  antenna_pattern: pagoda     # RHCP-Pagoda, sin^n mit dB-Fill -- Formparameter n/floor sind ANNAHME (siehe unten)
+  antenna_pattern_kwargs:
+    n: 2.0                    # ANNAHME: entspricht in etwa gemessenen Pagoda-Mustern, kein Datenblattwert
+    floor_db: -12.0           # ANNAHME: typischer Fill-Level durch Streustrahlung
+  polarization_r: 1.0         # RHCP, Referenz-Drehsinn (+1)
+
+scenario:
+  d_ground_m: 3000.0
+  environment_stage: 1        # 1=freies Land .. 4=Stadt
+  clutter_model: al_hourani   # Default -- reproduziert die Sollwerttabelle; "fixed" ist die kalibrierbare Alternative
+  vegetation_depth_m: 0.0     # keine Baumreihe im Basisszenario
+  two_ray_enabled: false      # implementiert, aber laut INSTRUCITONS.md per Default aus
+  atmospheric_specific_attenuation_db_per_km: 0.0  # unbelegt, siehe pathloss.py-Docstring -- bewusst 0
+  rain_rate_mm_per_hr: 0.0    # kein Regen im Basisszenario
+
+rx_mode: single                # 1 Empfangsantenne -- reproduziert die Sollwerte; operational.yaml nutzt dual_diversity
+
+rx_single:
+  gain_dbi: 2.0                # Rundstrahler am Fahrzeugdach -- ANNAHME (Teil 0, Frage 2)
+  height_m: 2.0                # Fahrzeugdach
+  feed_loss_db: 1.5            # Kabel Dach -> Geraet -- ANNAHME (Teil 0)
+  polarization_r: .inf         # linear -- ANNAHME (Teil 0, Frage 3: robustere Wahl gegen unbekannte Sender-Polarisation)
+  polarization_delta_tau_rad: 0.0
