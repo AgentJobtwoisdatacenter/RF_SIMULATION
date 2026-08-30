@@ -12,7 +12,7 @@ constants.py, geometry.py, antenna.py und pathloss.py.
 import numpy as np
 import pytest
 
-from rf_linksim import antenna, constants, environment, geometry, link, pathloss
+from rf_linksim import antenna, constants, environment, geometry, link, montecarlo, pathloss
 
 
 # --- constants.py ------------------------------------------------------------
@@ -614,3 +614,73 @@ def test_dual_diversity_combined_never_below_either_branch():
     dual = link.compute_link_budget_dual_diversity(scenario, tx, rx_a, rx_b)
     assert dual.cn0_combined_db_hz >= dual.branch_a.cn0_db_hz - 1e-9
     assert dual.cn0_combined_db_hz >= dual.branch_b.cn0_db_hz - 1e-9
+
+
+# --- montecarlo.py: Shadowing + Rice-Fading ---------------------------------
+
+
+def test_shadowing_p95_minus_p5():
+    """Sollwert aus INSTRUCITONS.md: P95 - P5 = 2*1,645*sigma (reines
+    Shadowing, kein Fading -- die 1,645-Faktoren sind die Standard-Quantile
+    der Normalverteilung bei 5%/95%)."""
+    rng = np.random.default_rng(42)
+    sigma = 6.0
+    samples = montecarlo.run_monte_carlo(
+        p_rx_deterministic_dbm=-90.0,
+        shadow_sigma_db=sigma,
+        rice_k_db=12.0,
+        n_runs=500_000,
+        rng=rng,
+        include_fading=False,
+    )
+    summary = montecarlo.percentile_summary(samples, percentiles=(5.0, 95.0))
+    spread = summary[95.0] - summary[5.0]
+    assert spread == pytest.approx(2.0 * 1.645 * sigma, rel=0.01)
+
+
+def test_rice_fading_normalized_to_unit_mean_power():
+    """Sollwert aus INSTRUCITONS.md: E[|h|^2] = 1, unabhaengig vom K-Faktor --
+    direkt an den komplexen Amplituden geprueft, nicht nur am dB-Ergebnis."""
+    rng = np.random.default_rng(7)
+    for k_db in (12.0, 8.0, 5.0, 3.0):
+        k_lin = 10.0 ** (k_db / 10.0)
+        s = np.sqrt(k_lin / (k_lin + 1.0))
+        sigma_f = np.sqrt(1.0 / (2.0 * (k_lin + 1.0)))
+        n = 2_000_000
+        h_real = s + sigma_f * rng.standard_normal(n)
+        h_imag = sigma_f * rng.standard_normal(n)
+        mean_power = np.mean(h_real**2 + h_imag**2)
+        assert mean_power == pytest.approx(1.0, rel=0.005)
+
+
+def test_rice_fading_db_median_more_negative_for_lower_k():
+    """Niedrigerer K-Faktor (mehr Mehrweganteile) muss staerker streuen --
+    der dB-Median des Fading-Terms wird dadurch negativer (Jensensche
+    Ungleichung, siehe Modul-Docstring), monoton mit sinkendem K."""
+    rng = np.random.default_rng(123)
+    medians = []
+    for k_db in (12.0, 8.0, 5.0, 3.0):  # Stufe 1 -> Stufe 4
+        samples_db = montecarlo.sample_rice_fading_db(k_db, 500_000, rng)
+        medians.append(np.median(samples_db))
+    assert medians == sorted(medians, reverse=True)  # streng monoton fallend
+    assert all(m <= 0.05 for m in medians)  # Median <= 0, nie ein Netto-Gewinn
+
+
+def test_run_monte_carlo_uses_single_deterministic_value():
+    """run_monte_carlo rechnet die Kette NICHT neu -- alle Stichproben
+    streuen um denselben deterministischen Wert."""
+    rng = np.random.default_rng(1)
+    det = -85.0
+    samples = montecarlo.run_monte_carlo(det, shadow_sigma_db=4.0, rice_k_db=12.0, n_runs=100_000, rng=rng)
+    # Median der reinen Shadowing+Fading-Streuung liegt nahe am deterministischen
+    # Wert (Shadowing ist symmetrisch um 0, Fading zieht den Median nur leicht,
+    # bei K=12 dB minimal).
+    assert np.median(samples) == pytest.approx(det, abs=1.0)
+
+
+def test_percentile_summary_basic():
+    samples = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    summary = montecarlo.percentile_summary(samples, percentiles=(0.0, 50.0, 100.0))
+    assert summary[0.0] == pytest.approx(1.0)
+    assert summary[50.0] == pytest.approx(3.0)
+    assert summary[100.0] == pytest.approx(5.0)
