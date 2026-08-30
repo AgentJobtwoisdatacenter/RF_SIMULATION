@@ -6,13 +6,13 @@ Toleranzen sind bewusst eng (rtol 1e-3 .. 1e-4), damit ein Vorzeichen- oder
 Rundungsfehler nicht durchrutscht.
 
 Baustein-weise nach INSTRUCITONS.md "Vorgehen": aktuell abgedeckt sind
-constants.py und geometry.py.
+constants.py, geometry.py, antenna.py und pathloss.py.
 """
 
 import numpy as np
 import pytest
 
-from rf_linksim import antenna, constants, geometry
+from rf_linksim import antenna, constants, geometry, pathloss
 
 
 # --- constants.py ------------------------------------------------------------
@@ -241,3 +241,132 @@ def test_plf_never_exceeds_unity():
                 plf = antenna.polarization_loss_factor(r1, r2, delta_tau)
                 assert plf <= 1.0 + 1e-9
                 assert plf >= -1e-9
+
+
+# --- pathloss.py: Freiraumdaempfung -----------------------------------------
+
+
+def test_fspl_5km_5_8ghz():
+    lam = constants.wavelength(5.8e9)
+    assert pathloss.free_space_path_loss(5000.0, lam) == pytest.approx(121.70, abs=0.01)
+
+
+def test_fspl_6km_5_8ghz():
+    lam = constants.wavelength(5.8e9)
+    assert pathloss.free_space_path_loss(6000.0, lam) == pytest.approx(123.28, abs=0.01)
+
+
+def test_fspl_doubling_distance_costs_6_02_db():
+    lam = constants.wavelength(5.8e9)
+    for d in (500.0, 1500.0, 3000.0):
+        l1 = pathloss.free_space_path_loss(d, lam)
+        l2 = pathloss.free_space_path_loss(2.0 * d, lam)
+        assert l2 - l1 == pytest.approx(6.0206, abs=1e-4)
+
+
+def test_fspl_vectorizes():
+    lam = constants.wavelength(5.8e9)
+    d = np.array([1000.0, 2000.0, 3000.0])
+    l = pathloss.free_space_path_loss(d, lam)
+    assert l.shape == d.shape
+    assert np.all(np.diff(l) > 0)  # monoton steigend mit der Entfernung
+
+
+# --- pathloss.py: Two-Ray-Bodenreflexion (Default: aus, hier nur Formel) ---
+
+
+def test_two_ray_breakpoint_baseline():
+    lam = constants.wavelength(5.8e9)
+    d_bp = pathloss.two_ray_breakpoint_distance(h_tx=100.0, h_rx=2.0, wavelength_m=lam)
+    assert d_bp == pytest.approx(15_500.0, rel=0.005)  # ~15,5 km
+
+
+def test_fresnel_reflection_zero_when_epsilon_equals_one():
+    """eps_r = 1 heisst 'Boden hat dieselbe Permittivitaet wie Luft' -- es
+    gibt dann physikalisch keine Grenzflaeche und der Reflexionskoeffizient
+    muss exakt 0 sein, unabhaengig vom Winkel."""
+    eps_g = pathloss.complex_relative_permittivity(
+        epsilon_r=1.0, conductivity_s_per_m=0.0, wavelength_m=0.05169
+    )
+    for psi_deg in (5.0, 20.0, 45.0, 80.0):
+        psi = np.radians(psi_deg)
+        gamma_h = pathloss.fresnel_reflection_coefficient(psi, eps_g, "horizontal")
+        gamma_v = pathloss.fresnel_reflection_coefficient(psi, eps_g, "vertical")
+        assert abs(gamma_h) == pytest.approx(0.0, abs=1e-9)
+        assert abs(gamma_v) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_fresnel_reflection_magnitude_bounded_for_lossless_ground():
+    """|Gamma| darf fuer einen verlustfreien, passiven Boden nie > 1 werden
+    -- eine Grenzflaeche kann keine Leistung erzeugen."""
+    eps_g = pathloss.complex_relative_permittivity(
+        epsilon_r=15.0, conductivity_s_per_m=0.0, wavelength_m=0.05169
+    )
+    for psi_deg in np.linspace(1.0, 89.0, 20):
+        psi = np.radians(psi_deg)
+        for pol in ("horizontal", "vertical"):
+            gamma = pathloss.fresnel_reflection_coefficient(psi, eps_g, pol)
+            assert abs(gamma) <= 1.0 + 1e-9
+
+
+def test_ament_roughness_smooth_ground_is_lossless():
+    """h_rms = 0 (perfekt glatter Boden) darf die Reflexion nicht zusaetzlich
+    daempfen -- rho_s muss exakt 1 sein."""
+    rho = pathloss.ament_roughness_factor(
+        grazing_angle_rad=np.radians(10.0), height_rms_m=0.0, wavelength_m=0.05169
+    )
+    assert rho == pytest.approx(1.0)
+
+
+def test_ament_roughness_decreases_with_roughness():
+    psi = np.radians(10.0)
+    lam = 0.05169
+    rho_smooth = pathloss.ament_roughness_factor(psi, height_rms_m=0.01, wavelength_m=lam)
+    rho_rough = pathloss.ament_roughness_factor(psi, height_rms_m=0.5, wavelength_m=lam)
+    assert 0.0 <= rho_rough < rho_smooth <= 1.0
+
+
+def test_two_ray_extra_loss_vanishes_without_reflection():
+    """Mit eps_r = 1 (kein Reflexionskoeffizient) darf der Two-Ray-Zusatzterm
+    exakt 0 dB sein -- die Formel muss sich dann auf reines FSPL reduzieren."""
+    lam = constants.wavelength(5.8e9)
+    extra_db = pathloss.two_ray_extra_loss_db(
+        d_ground=3000.0, h_tx=100.0, h_rx=2.0, wavelength_m=lam,
+        epsilon_r=1.0, conductivity_s_per_m=0.0, height_rms_m=0.0,
+    )
+    assert extra_db == pytest.approx(0.0, abs=1e-6)
+
+
+def test_two_ray_path_loss_matches_fspl_without_reflection():
+    lam = constants.wavelength(5.8e9)
+    d_direct = geometry.slant_range(3000.0, 100.0, 2.0)
+    fspl = pathloss.free_space_path_loss(d_direct, lam)
+    two_ray = pathloss.two_ray_path_loss_db(
+        d_ground=3000.0, h_tx=100.0, h_rx=2.0, wavelength_m=lam,
+        epsilon_r=1.0, conductivity_s_per_m=0.0, height_rms_m=0.0,
+    )
+    assert two_ray == pytest.approx(fspl, abs=1e-6)
+
+
+# --- pathloss.py: Atmosphaere/Regen (Formelstruktur, keine eingebauten Koeff.) --
+
+
+def test_atmospheric_attenuation_zero_coefficient_is_zero_loss():
+    assert pathloss.atmospheric_attenuation_db(6000.0, specific_attenuation_db_per_km=0.0) == 0.0
+
+
+def test_atmospheric_attenuation_scales_linearly_with_distance():
+    loss_3km = pathloss.atmospheric_attenuation_db(3000.0, specific_attenuation_db_per_km=0.02)
+    loss_6km = pathloss.atmospheric_attenuation_db(6000.0, specific_attenuation_db_per_km=0.02)
+    assert loss_6km == pytest.approx(2.0 * loss_3km)
+
+
+def test_rain_attenuation_zero_rain_is_zero_loss():
+    # Ergebnis muss unabhaengig von k/alpha exakt 0 sein, wenn es nicht regnet.
+    assert pathloss.rain_attenuation_db(6000.0, rain_rate_mm_per_hr=0.0, k=0.01, alpha=1.3) == 0.0
+
+
+def test_rain_attenuation_power_law_in_rain_rate():
+    l1 = pathloss.rain_attenuation_db(1000.0, rain_rate_mm_per_hr=10.0, k=0.01, alpha=1.3)
+    l2 = pathloss.rain_attenuation_db(1000.0, rain_rate_mm_per_hr=20.0, k=0.01, alpha=1.3)
+    assert l2 / l1 == pytest.approx(2.0**1.3)
