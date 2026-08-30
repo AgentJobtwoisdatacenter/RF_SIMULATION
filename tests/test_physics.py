@@ -9,10 +9,12 @@ Baustein-weise nach INSTRUCITONS.md "Vorgehen": aktuell abgedeckt sind
 constants.py, geometry.py, antenna.py und pathloss.py.
 """
 
+import dataclasses
+
 import numpy as np
 import pytest
 
-from rf_linksim import antenna, constants, environment, geometry, link, montecarlo, pathloss
+from rf_linksim import antenna, constants, environment, geometry, link, montecarlo, pathloss, sweep
 
 
 # --- constants.py ------------------------------------------------------------
@@ -684,3 +686,61 @@ def test_percentile_summary_basic():
     assert summary[0.0] == pytest.approx(1.0)
     assert summary[50.0] == pytest.approx(3.0)
     assert summary[100.0] == pytest.approx(5.0)
+
+
+# --- sweep.py: Distanz-/Hoehen-/2D-Sweeps -----------------------------------
+
+
+def _sweep_baseline_tx_rx():
+    scenario = link.Scenario(d_ground_m=3000.0, environment_stage=1)
+    tx = link.Transmitter(power_dbm=constants.watt_to_dbm(2.0))
+    rx = link.ReceiveAntenna(gain_dbi=2.0, feed_loss_db=1.5, polarization_r=float("inf"))
+    return scenario, tx, rx
+
+
+def test_distance_sweep_matches_scalar_calls():
+    scenario, tx, rx = _sweep_baseline_tx_rx()
+    distances = np.array([200.0, 1000.0, 3000.0, 6000.0])
+    swept = sweep.distance_sweep(distances, scenario, tx, rx)
+    assert swept.p_rx_dbm.shape == distances.shape
+    for i, d in enumerate(distances):
+        scalar_scenario = dataclasses.replace(scenario, d_ground_m=float(d))
+        scalar_result = link.compute_link_budget(scalar_scenario, tx, rx)
+        assert swept.p_rx_dbm[i] == pytest.approx(scalar_result.p_rx_dbm)
+        assert swept.cn0_db_hz[i] == pytest.approx(scalar_result.cn0_db_hz)
+
+
+def test_distance_sweep_all_stages_returns_four_stages():
+    scenario, tx, rx = _sweep_baseline_tx_rx()
+    distances = np.array([500.0, 3000.0])
+    results = sweep.distance_sweep_all_stages(distances, scenario, tx, rx)
+    assert set(results.keys()) == {1, 2, 3, 4}
+    for stage, r in results.items():
+        assert r.p_rx_dbm.shape == distances.shape
+    # Stufe 4 (Stadt) muss bei gleicher Distanz schlechter sein als Stufe 1.
+    assert np.all(results[4].p_rx_dbm <= results[1].p_rx_dbm)
+
+
+def test_height_sweep_matches_scalar_calls():
+    scenario, tx, rx = _sweep_baseline_tx_rx()
+    heights = np.array([50.0, 100.0, 150.0])
+    swept = sweep.height_sweep(heights, scenario, tx, rx)
+    assert swept.p_rx_dbm.shape == heights.shape
+    for i, h in enumerate(heights):
+        scalar_tx = dataclasses.replace(tx, height_m=float(h))
+        scalar_result = link.compute_link_budget(scenario, scalar_tx, rx)
+        assert swept.p_rx_dbm[i] == pytest.approx(scalar_result.p_rx_dbm)
+
+
+def test_grid_sweep_shape_and_spot_check():
+    scenario, tx, rx = _sweep_baseline_tx_rx()
+    distances = np.array([500.0, 3000.0, 6000.0])
+    heights = np.array([50.0, 100.0])
+    grid = sweep.grid_sweep(distances, heights, scenario, tx, rx)
+    assert grid.p_rx_dbm.shape == (3, 2)
+
+    # Stichprobe: Zelle [1, 0] (Distanz=3000, Hoehe=50) gegen Einzelrechnung.
+    scalar_scenario = dataclasses.replace(scenario, d_ground_m=3000.0)
+    scalar_tx = dataclasses.replace(tx, height_m=50.0)
+    scalar_result = link.compute_link_budget(scalar_scenario, scalar_tx, rx)
+    assert grid.p_rx_dbm[1, 0] == pytest.approx(scalar_result.p_rx_dbm)
