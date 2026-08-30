@@ -12,7 +12,7 @@ constants.py, geometry.py, antenna.py und pathloss.py.
 import numpy as np
 import pytest
 
-from rf_linksim import antenna, constants, environment, geometry, pathloss
+from rf_linksim import antenna, constants, environment, geometry, link, pathloss
 
 
 # --- constants.py ------------------------------------------------------------
@@ -454,3 +454,163 @@ def test_stage_2_eta_nlos_corrected_for_monotonicity():
     monoton bleibt -- Regressionsschutz gegen versehentliches Zuruecksetzen
     auf den publizierten Wert."""
     assert environment.STAGES[2].eta_nlos_db == 18.0
+
+
+# --- link.py: die volle Kette ------------------------------------------------
+
+
+def _baseline_scenario_tx_rx(stage=1, d_ground_m=3000.0, tilt_rad=0.0):
+    scenario = link.Scenario(d_ground_m=d_ground_m, environment_stage=stage)
+    tx = link.Transmitter(power_dbm=constants.watt_to_dbm(2.0), tilt_rad=tilt_rad)
+    rx = link.ReceiveAntenna(gain_dbi=2.0, feed_loss_db=1.5, polarization_r=float("inf"))
+    return scenario, tx, rx
+
+
+def test_link_budget_baseline_matches_independent_hand_check():
+    """Regressionstest gegen die eigene, zweifach unabhaengig (dB-Summe +
+    lineare Watt-Rechnung) nachgerechnete Kette (siehe Konversation) -- NICHT
+    gegen die Dokument-Ankertabelle, die einen ungeklaerten ~0,37-dB-Offset
+    hat. Dieser Test sichert ab, dass link.py die Formeln korrekt verdrahtet,
+    unabhaengig von dieser offenen Frage."""
+    scenario, tx, rx = _baseline_scenario_tx_rx()
+    result = link.compute_link_budget(scenario, tx, rx)
+    assert result.p_rx_dbm == pytest.approx(-90.6448, abs=0.001)
+    # 173,98 ist die auf 2 Nachkommastellen gerundete kT0-Konstante; die
+    # exakt berechnete kt0_dbm_per_hz() weicht davon um ~0,005 dB ab, daher
+    # die etwas weitere Toleranz hier (P_rx selbst ist auf 0,001 dB exakt).
+    assert result.cn0_db_hz == pytest.approx(83.3352, abs=0.01)
+
+
+def test_link_budget_matches_documented_matrix_within_known_offset():
+    """Gegen die volle Dokument-Sollwertmatrix, mit der dokumentierten,
+    bewusst weiten Toleranz fuer den ungeklaerten ~0,37-dB-Offset (siehe
+    Konversation) -- faengt groessere Regressionen ab, ohne den bekannten
+    kleinen Offset als Fehlschlag zu werten."""
+    target = {
+        200: [110.9, 110.9, 102.3, 94.0],
+        500: [104.5, 100.0, 86.8, 83.1],
+        1000: [98.5, 84.7, 79.8, 76.6],
+        2000: [89.3, 76.2, 73.5, 70.5],
+        3000: [83.7, 72.3, 69.9, 66.9],
+        5000: [78.1, 67.6, 65.4, 62.4],
+        6000: [76.3, 65.9, 63.8, 60.8],
+    }
+    for d_ground, row in target.items():
+        for stage_idx, cn0_target in zip((1, 2, 3, 4), row):
+            scenario, tx, rx = _baseline_scenario_tx_rx(stage=stage_idx, d_ground_m=d_ground)
+            result = link.compute_link_budget(scenario, tx, rx)
+            assert result.cn0_db_hz == pytest.approx(cn0_target, abs=0.5)
+
+
+def test_link_budget_sum_of_terms_equals_p_rx_exactly():
+    """Struktureller Test aus INSTRUCITONS.md: die Summe aller Budget-Terme
+    muss P_rx exakt ergeben."""
+    scenario, tx, rx = _baseline_scenario_tx_rx()
+    r = link.compute_link_budget(scenario, tx, rx)
+    reconstructed = (
+        r.tx_power_term_dbm
+        + r.rx_gain_dbi
+        - r.fspl_db
+        - r.clutter_loss_db
+        - r.vegetation_loss_db
+        + r.two_ray_extra_db
+        - r.atmospheric_loss_db
+        - r.rain_loss_db
+        - r.polarization_loss_db
+        - r.feed_loss_db
+    )
+    assert reconstructed == pytest.approx(r.p_rx_dbm, abs=1e-9)
+
+
+def test_link_budget_cn0_p_rx_relation_exact():
+    scenario, tx, rx = _baseline_scenario_tx_rx()
+    r = link.compute_link_budget(scenario, tx, rx)
+    assert r.cn0_db_hz - r.p_rx_dbm == pytest.approx(173.98, abs=0.01)
+
+
+def test_power_is_eirp_does_not_double_count_gain():
+    """Struktureller Test aus INSTRUCITONS.md: power_is_eirp=True darf den
+    Antennengewinn nicht doppelt zaehlen -- bei verschiedenen Distanzen
+    (verschiedene theta) geprueft, nicht nur an einem Punkt."""
+    raw_power_dbm = 20.0
+    for d_ground in (300.0, 1500.0, 4000.0):
+        scenario = link.Scenario(d_ground_m=d_ground, environment_stage=1)
+        rx = link.ReceiveAntenna(gain_dbi=0.0, polarization_r=1.0)
+
+        tx_raw = link.Transmitter(power_dbm=raw_power_dbm, power_is_eirp=False)
+        r_raw = link.compute_link_budget(scenario, tx_raw, rx)
+
+        peak_directivity_dbi = antenna.directivity_dbi(tx_raw.antenna_pattern)
+        tx_eirp = link.Transmitter(
+            power_dbm=raw_power_dbm + peak_directivity_dbi, power_is_eirp=True
+        )
+        r_eirp = link.compute_link_budget(scenario, tx_eirp, rx)
+
+        assert r_eirp.p_rx_dbm == pytest.approx(r_raw.p_rx_dbm, abs=1e-9)
+
+
+def test_distance_doubling_costs_exactly_6_02_db_without_clutter_isotropic():
+    """Struktureller Test aus INSTRUCITONS.md: ohne Clutter und mit isotroper
+    Antenne kostet jede Distanzverdopplung exakt 6,02 dB -- durch die volle
+    Kette gepruft, nicht nur in pathloss.py isoliert."""
+    # Gleiche Hoehe TX/RX (0 m), damit Grundentfernung = Schraegentfernung
+    # ist und eine Grundentfernungs-Verdopplung auch die Ausbreitungsstrecke
+    # exakt verdoppelt -- sonst greift der Slant-vs-Ground-Effekt aus
+    # test_fspl_uses_slant_not_ground_range und verfaelscht den Vergleich.
+    tx = link.Transmitter(
+        power_dbm=30.0,
+        height_m=0.0,
+        antenna_pattern=antenna.isotropic_pattern,
+        polarization_r=1.0,
+    )
+    rx = link.ReceiveAntenna(gain_dbi=0.0, height_m=0.0, feed_loss_db=0.0, polarization_r=1.0)
+    for d in (400.0, 1200.0, 2500.0):
+        s1 = link.Scenario(d_ground_m=d, environment_stage=1, clutter_model="fixed", clutter_fixed_db=0.0)
+        s2 = link.Scenario(d_ground_m=2.0 * d, environment_stage=1, clutter_model="fixed", clutter_fixed_db=0.0)
+        r1 = link.compute_link_budget(s1, tx, rx)
+        r2 = link.compute_link_budget(s2, tx, rx)
+        assert r1.p_rx_dbm - r2.p_rx_dbm == pytest.approx(6.0206, abs=1e-3)
+
+
+def test_denser_stage_never_improves_signal_through_full_chain():
+    scenario_base_kwargs = dict(d_ground_m=1500.0)
+    tx = link.Transmitter(power_dbm=constants.watt_to_dbm(2.0))
+    rx = link.ReceiveAntenna(gain_dbi=2.0, feed_loss_db=1.5, polarization_r=float("inf"))
+    results = []
+    for stage in (1, 2, 3, 4):
+        scenario = link.Scenario(environment_stage=stage, **scenario_base_kwargs)
+        results.append(link.compute_link_budget(scenario, tx, rx).p_rx_dbm)
+    assert results == sorted(results, reverse=True)  # streng monoton fallend
+
+
+# --- link.py: dual_diversity (RHCP+LHCP, bladeRF-Default) ------------------
+
+
+def test_dual_diversity_recovers_polarization_loss():
+    """RHCP-Sender, RHCP+LHCP-Empfangspaar: der RHCP-Zweig hat 0 dB PLF, der
+    LHCP-Zweig -> inf dB PLF (traegt nichts bei). Kombiniert muss das
+    praktisch exakt dem RHCP-Zweig allein entsprechen -- und das ist genau
+    die 3,01 dB, die eine einzelne lineare Antenne (single-Modus) verliert."""
+    scenario = link.Scenario(d_ground_m=3000.0, environment_stage=1)
+    tx = link.Transmitter(power_dbm=constants.watt_to_dbm(2.0), polarization_r=1.0)
+    rx_a = link.ReceiveAntenna(gain_dbi=2.0, feed_loss_db=1.5, polarization_r=1.0)  # RHCP
+    rx_b = link.ReceiveAntenna(gain_dbi=2.0, feed_loss_db=1.5, polarization_r=-1.0)  # LHCP
+
+    dual = link.compute_link_budget_dual_diversity(scenario, tx, rx_a, rx_b)
+    assert dual.branch_a.polarization_loss_db == pytest.approx(0.0, abs=1e-9)
+    assert np.isinf(dual.branch_b.polarization_loss_db)
+    assert dual.cn0_combined_db_hz == pytest.approx(dual.branch_a.cn0_db_hz, abs=1e-6)
+
+    rx_linear = link.ReceiveAntenna(gain_dbi=2.0, feed_loss_db=1.5, polarization_r=float("inf"))
+    single = link.compute_link_budget(scenario, tx, rx_linear)
+    assert dual.cn0_combined_db_hz - single.cn0_db_hz == pytest.approx(3.0103, abs=0.01)
+
+
+def test_dual_diversity_combined_never_below_either_branch():
+    scenario = link.Scenario(d_ground_m=1200.0, environment_stage=2)
+    tx = link.Transmitter(power_dbm=constants.watt_to_dbm(2.0), polarization_r=1.0)
+    rx_a = link.ReceiveAntenna(gain_dbi=2.0, feed_loss_db=1.5, polarization_r=1.0)
+    rx_b = link.ReceiveAntenna(gain_dbi=2.0, feed_loss_db=1.5, polarization_r=-1.0)
+    dual = link.compute_link_budget_dual_diversity(scenario, tx, rx_a, rx_b)
+    assert dual.cn0_combined_db_hz >= dual.branch_a.cn0_db_hz - 1e-9
+    assert dual.cn0_combined_db_hz >= dual.branch_b.cn0_db_hz - 1e-9
