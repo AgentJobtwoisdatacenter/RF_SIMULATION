@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rf_linksim"
+version = "0.1.0"
+description = "Hardwareunabhaengige RF-Ausbreitungssimulation fuer den 5,8-GHz-FPV-Videodownlink (Schritt 1: Pegel bis zur Antennenklemme)"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

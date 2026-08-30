@@ -1,0 +1,51 @@
+# Reales Zielszenario -- bladeRF 2.0 micro xA9, 2 phasenkohaerente Kanaele,
+# 20 Grad Vorwaertsflug-Tilt. Weicht bewusst von default.yaml ab (siehe
+# Konversation) und ist NICHT gegen die Verifikationstabelle geprueft --
+# dafuer bleibt default.yaml die Referenz.
+#
+# Jeder Wert unten, der keine Messung ist, sondern eine Annahme, ist mit
+# "# ANNAHME" markiert.
+
+transmitter:
+  power_dbm: 33.0103        # 2 W HF-Ausgangsleistung, exakt
+  power_is_eirp: false
+  frequency_hz: 5.8e+9       # Simulation vorerst nur bei 5,8/5,9 GHz -- Breitband-Scan (0,5-6 GHz) ist ein spaeterer Schritt
+  height_m: 100.0
+  tilt_deg: 20.0              # ANNAHME: Vorwaertsflug-Nickwinkel (Teil 0, Frage 4: Spanne 20-30 Grad, unterer Wert angesetzt)
+  antenna_pattern: pagoda
+  antenna_pattern_kwargs:
+    n: 2.0                    # ANNAHME, siehe default.yaml
+    floor_db: -12.0           # ANNAHME, siehe default.yaml
+  polarization_r: 1.0         # RHCP
+
+scenario:
+  d_ground_m: 3000.0
+  environment_stage: 1
+  clutter_model: al_hourani
+  vegetation_depth_m: 0.0
+  two_ray_enabled: false
+  atmospheric_specific_attenuation_db_per_km: 0.0
+  rain_rate_mm_per_hr: 0.0
+
+rx_mode: dual_diversity        # 2 phasenkohaerente bladeRF-2.0-micro-xA9-Kanaele (siehe Konversation, Nuand-Quellen)
+
+rx_dual:
+  # ANNAHME (gesamter Block): zwei identische Breitband-Rundstrahler
+  # 600-6000 MHz, linear polarisiert -- Kandidat: Data-Alliance
+  # 5G/4G-Antenne 600-6000MHz SMA (~3,49 USD/Stueck, siehe Konversation).
+  # Gewinn 4,34 dBi ist der vom Hersteller angegebene Wert fuer das
+  # 3300-6000-MHz-Teilband, in das 5,8/5,9 GHz faellt -- NICHT der Peak-Gewinn
+  # der Antenne insgesamt. Linear (nicht RHCP/LHCP) heisst: kein
+  # Polarisations-Diversity-Gewinn mehr (beide Kanaele haben denselben
+  # 3-dB-Verlust gegen den RHCP-Sender wie rx_single), nur noch reiner
+  # 2-Kanal-Combining-Gewinn (MRC, C/N0 summiert sich linear).
+  branch_a:
+    gain_dbi: 4.34
+    height_m: 2.0
+    feed_loss_db: 1.5         # ANNAHME: uebernommen aus default.yaml, nicht antennenspezifisch nachgemessen
+    polarization_r: .inf
+  branch_b:
+    gain_dbi: 4.34
+    height_m: 2.0
+    feed_loss_db: 1.5
+    polarization_r: .inf
