@@ -45,6 +45,19 @@ def height_sweep(h_tx_m, scenario_template, tx_template, rx):
     return link.compute_link_budget(scenario_template, tx, rx)
 
 
+def distance_sweep_dual_diversity_all_stages(
+    d_ground_m, scenario_template, tx, rx_a, rx_b, stages=(1, 2, 3, 4)
+):
+    """distance_sweep_all_stages() fuer rx_mode='dual_diversity', {stage: DualDiversityResult}."""
+    results = {}
+    for stage in stages:
+        scenario = dataclasses.replace(
+            scenario_template, d_ground_m=np.asarray(d_ground_m, dtype=float), environment_stage=stage
+        )
+        results[stage] = link.compute_link_budget_dual_diversity(scenario, tx, rx_a, rx_b)
+    return results
+
+
 def grid_sweep(d_ground_m, h_tx_m, scenario_template, tx_template, rx):
     """2D-Gitter Distanz x Flughoehe, indexing='ij' (Zeile=Distanz, Spalte=Hoehe).
 

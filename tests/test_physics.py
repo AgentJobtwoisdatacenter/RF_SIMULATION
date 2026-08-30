@@ -889,3 +889,16 @@ def test_operational_tilt_reduces_gain_relative_to_verification_baseline():
     # (nicht direkt vergleichbar wegen dual vs single -- nur der Tilt-Effekt
     # auf den TX-Gewinn wird hier isoliert geprueft)
     assert operational_cfg.transmitter.tilt_rad > default_cfg.transmitter.tilt_rad
+
+
+def test_distance_sweep_dual_diversity_all_stages():
+    scenario = link.Scenario(d_ground_m=3000.0, environment_stage=1)
+    tx = link.Transmitter(power_dbm=constants.watt_to_dbm(2.0), polarization_r=1.0)
+    rx_a = link.ReceiveAntenna(gain_dbi=4.34, feed_loss_db=1.5, polarization_r=float("inf"))
+    rx_b = link.ReceiveAntenna(gain_dbi=4.34, feed_loss_db=1.5, polarization_r=float("inf"))
+    distances = np.array([500.0, 3000.0])
+    results = sweep.distance_sweep_dual_diversity_all_stages(distances, scenario, tx, rx_a, rx_b)
+    assert set(results.keys()) == {1, 2, 3, 4}
+    for stage, r in results.items():
+        assert r.cn0_combined_db_hz.shape == distances.shape
+        assert np.all(r.cn0_combined_db_hz >= r.branch_a.cn0_db_hz - 1e-9)
