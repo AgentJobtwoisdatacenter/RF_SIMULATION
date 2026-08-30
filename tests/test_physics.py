@@ -14,7 +14,18 @@ import dataclasses
 import numpy as np
 import pytest
 
-from rf_linksim import antenna, constants, environment, geometry, link, montecarlo, pathloss, requirements, sweep
+from rf_linksim import (
+    antenna,
+    constants,
+    environment,
+    geometry,
+    link,
+    montecarlo,
+    pathloss,
+    plotting,
+    requirements,
+    sweep,
+)
 
 
 # --- constants.py ------------------------------------------------------------
@@ -793,3 +804,49 @@ def test_spectral_power_density_recovers_bin_power():
     # Aufsummiert ueber die volle Signalbandbreite muss PSD wieder P_rx ergeben.
     p_recovered = psd + 10.0 * np.log10(b_signal)
     assert p_recovered == pytest.approx(p_rx_dbm)
+
+
+# --- plotting.py: strukturelle Tests (kein Pixelvergleich) -----------------
+
+
+def test_plot_distance_sweep_by_stage_structure():
+    scenario = link.Scenario(d_ground_m=3000.0, environment_stage=1)
+    tx = link.Transmitter(power_dbm=constants.watt_to_dbm(2.0))
+    rx = link.ReceiveAntenna(gain_dbi=2.0, feed_loss_db=1.5, polarization_r=float("inf"))
+    distances = np.array([200.0, 1000.0, 3000.0, 6000.0])
+    results = sweep.distance_sweep_all_stages(distances, scenario, tx, rx)
+
+    fig = plotting.plot_distance_sweep_by_stage(distances, results, quantity="cn0_db_hz")
+    ax = fig.axes[0]
+    assert len(ax.lines) == 4
+    legend = ax.get_legend()
+    assert legend is not None
+    assert len(legend.get_texts()) == 4
+    assert ax.get_ylabel() == "C/N0 [dB-Hz]"
+    plotting.plt.close(fig)
+
+
+def test_plot_grid_heatmap_structure():
+    scenario = link.Scenario(d_ground_m=3000.0, environment_stage=1)
+    tx = link.Transmitter(power_dbm=constants.watt_to_dbm(2.0))
+    rx = link.ReceiveAntenna(gain_dbi=2.0, feed_loss_db=1.5, polarization_r=float("inf"))
+    distances = np.array([500.0, 3000.0, 6000.0])
+    heights = np.array([50.0, 100.0])
+    grid = sweep.grid_sweep(distances, heights, scenario, tx, rx)
+
+    fig = plotting.plot_grid_heatmap(distances, heights, grid, quantity="p_rx_dbm")
+    assert len(fig.axes) == 2  # Hauptachse + Colorbar
+    plotting.plt.close(fig)
+
+
+def test_save_figure_writes_file(tmp_path):
+    scenario = link.Scenario(d_ground_m=3000.0, environment_stage=1)
+    tx = link.Transmitter(power_dbm=constants.watt_to_dbm(2.0))
+    rx = link.ReceiveAntenna(gain_dbi=2.0, feed_loss_db=1.5, polarization_r=float("inf"))
+    distances = np.array([200.0, 3000.0])
+    results = sweep.distance_sweep_all_stages(distances, scenario, tx, rx)
+    fig = plotting.plot_distance_sweep_by_stage(distances, results)
+    out_path = tmp_path / "test_plot.png"
+    plotting.save_figure(fig, out_path)
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
